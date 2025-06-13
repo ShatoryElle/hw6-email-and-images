@@ -1,105 +1,94 @@
+import { randomBytes } from 'crypto';
 import bcrypt from 'bcryptjs';
 import createHttpError from 'http-errors';
 import User from '../db/models/user.js';
 import Session from '../db/models/session.js';
-import { generateAccessToken, generateRefreshToken } from '../utils/tokenUtils.js';
 
-export async function registerUser({ name, email, password }) {
-  const existingUser = await User.findOne({ email });
-  if (existingUser) {
-    throw createHttpError(409, 'Email is already in use');
-  }
+const ACCESS_TOKEN_EXPIRATION = 15 * 60 * 1000;
+const REFRESH_TOKEN_EXPIRATION = 30 * 24 * 60 * 60 * 1000;
+const TOKEN_LENGTH = 30;
 
+const findUserByEmail = async (email) => {
+  return User.findOne({ email });
+};
+
+const createUser = async ({ name, email, password }) => {
   const hashedPassword = await bcrypt.hash(password, 10);
+  return User.create({ name, email, password: hashedPassword });
+};
 
-  const user = await User.create({
-    name,
-    email,
-    password: hashedPassword,
-  });
+const generateTokens = () => ({
+  accessToken: randomBytes(TOKEN_LENGTH).toString('base64'),
+  refreshToken: randomBytes(TOKEN_LENGTH).toString('base64'),
+});
 
-  const { accessToken, expiresAt: accessTokenValidUntil } = generateAccessToken(user._id.toString());
-  const { refreshToken, expiresAt: refreshTokenValidUntil } = generateRefreshToken();
-
-  const session = await Session.create({
-    userId: user._id,
-    refreshToken,
-    refreshTokenValidUntil,
-    accessToken,
-    accessTokenValidUntil,
-  });
-
-  return {
-    user,
-    accessToken,
-    refreshToken,
-    sessionId: session._id.toString(),
-  };
-}
-
-export async function loginUser(email, password) {
+const loginUser = async ({ email, password }) => {
   const user = await User.findOne({ email });
   if (!user) {
-    throw createHttpError(401, 'Email or password is wrong');
+    throw createHttpError(401, 'Invalid email or password');
   }
 
-  const isPasswordValid = await bcrypt.compare(password, user.password);
-  if (!isPasswordValid) {
-    throw createHttpError(401, 'Email or password is wrong');
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) {
+    throw createHttpError(401, 'Invalid email or password');
   }
 
-  // Видалення попередніх сесій користувача
-  await Session.deleteMany({ userId: user._id });
+  await Session.deleteOne({ userId: user._id });
 
-  const { accessToken, expiresAt: accessTokenValidUntil } = generateAccessToken(user._id.toString());
-  const { refreshToken, expiresAt: refreshTokenValidUntil } = generateRefreshToken();
+  const { accessToken, refreshToken } = generateTokens();
 
-  const session = await Session.create({
+  await Session.create({
     userId: user._id,
-    refreshToken,
-    refreshTokenValidUntil,
     accessToken,
-    accessTokenValidUntil,
+    refreshToken,
+    accessTokenValidUntil: new Date(Date.now() + ACCESS_TOKEN_EXPIRATION),
+    refreshTokenValidUntil: new Date(Date.now() + REFRESH_TOKEN_EXPIRATION),
   });
 
-  return {
-    user,
-    accessToken,
-    refreshToken,
-    sessionId: session._id.toString(),
-  };
-}
+  return { accessToken, refreshToken };
+};
 
-export async function logoutUser(sessionId) {
-  const deletedSession = await Session.findByIdAndDelete(sessionId);
-  if (!deletedSession) {
-    throw createHttpError(404, 'Session not found');
-  }
-}
-
-export async function refreshTokens(oldRefreshToken) {
-  if (!oldRefreshToken) {
-    throw createHttpError(401, 'Refresh token is missing');
-  }
-
+const refreshSession = async (oldRefreshToken) => {
   const session = await Session.findOne({ refreshToken: oldRefreshToken });
-  if (!session) {
-    throw createHttpError(401, 'Invalid refresh token');
+  if (!session || new Date() > session.refreshTokenValidUntil) {
+    throw createHttpError(403, 'Invalid or expired refresh token');
   }
 
-  const { accessToken, expiresAt: accessTokenValidUntil } = generateAccessToken(session.userId.toString());
-  const { refreshToken, expiresAt: refreshTokenValidUntil } = generateRefreshToken();
+  await Session.deleteOne({ _id: session._id });
 
-  session.refreshToken = refreshToken;
-  session.refreshTokenValidUntil = refreshTokenValidUntil;
-  session.accessToken = accessToken;
-  session.accessTokenValidUntil = accessTokenValidUntil;
+  const { accessToken, refreshToken } = generateTokens();
 
-  await session.save();
-
-  return {
+  await Session.create({
+    userId: session.userId,
     accessToken,
     refreshToken,
-    sessionId: session._id.toString(),
-  };
-}
+    accessTokenValidUntil: new Date(Date.now() + ACCESS_TOKEN_EXPIRATION),
+    refreshTokenValidUntil: new Date(Date.now() + REFRESH_TOKEN_EXPIRATION),
+  });
+
+  return { accessToken, refreshToken };
+};
+
+const logoutUser = async (refreshToken) => {
+  const session = await Session.findOne({ refreshToken });
+  if (!session) {
+    throw createHttpError(403, 'Invalid refresh token');
+  }
+
+  await Session.deleteOne({ _id: session._id });
+};
+
+const resetUserPassword = async (user, newPassword) => {
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  user.password = hashedPassword;
+  await user.save();
+};
+
+export default {
+  findUserByEmail,
+  createUser,
+  loginUser,
+  refreshSession,
+  logoutUser,
+  resetUserPassword,
+};

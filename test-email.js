@@ -8,7 +8,7 @@ async function sendTestEmail() {
       secure: false, 
       auth: {
         user: '8f6694001@smtp-brevo.com',
-        pass: '3c0fO8UKCtSzPMbB',
+        pass: '',
       },
       tls: {
         rejectUnauthorized: false,
